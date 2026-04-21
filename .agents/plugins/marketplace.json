@@ -1,0 +1,20 @@
+{
+  "name": "morozov-codex-plugin",
+  "interface": {
+    "displayName": "Morozov Codex Plugins"
+  },
+  "plugins": [
+    {
+      "name": "formal-methods",
+      "source": {
+        "source": "local",
+        "path": "./plugins/formal-methods"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

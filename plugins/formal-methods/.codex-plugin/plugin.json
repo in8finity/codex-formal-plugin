@@ -1,0 +1,41 @@
+{
+  "name": "formal-methods",
+  "version": "1.0.0",
+  "description": "Formal modeling and hypothesis-driven debugging using Alloy 6 and Dafny.",
+  "author": {
+    "name": "Alexander Morozov",
+    "email": "contact@a-morozov.com",
+    "url": "https://a-morozov.com"
+  },
+  "homepage": "https://github.com/in8finity/claude-plugin",
+  "repository": "https://github.com/in8finity/claude-plugin",
+  "license": "CC-BY-NC-SA-4.0",
+  "keywords": [
+    "formal-methods",
+    "alloy",
+    "dafny",
+    "model-checking",
+    "debugging"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Formal Methods",
+    "shortDescription": "Model, verify, and debug systems with Alloy 6 and Dafny.",
+    "longDescription": "Formal modeling and hypothesis-driven debugging skills for software systems, business processes, state machines, permission matrices, API contracts, and root-cause investigations. Includes Alloy 6 and Dafny runners, examples, self-models, and reconciliation workflows.",
+    "developerName": "Alexander Morozov",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/in8finity/claude-plugin",
+    "privacyPolicyURL": "https://github.com/in8finity/claude-plugin",
+    "termsOfServiceURL": "https://github.com/in8finity/claude-plugin/blob/main/LICENSE",
+    "defaultPrompt": [
+      "Use formal-modeling to verify this state machine.",
+      "Use formal-debugger to investigate this bug.",
+      "Model these business rules in Alloy."
+    ],
+    "brandColor": "#2563EB"
+  }
+}
