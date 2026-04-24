@@ -18,15 +18,81 @@ Requires `formal-modeling` skill. Hypothesis accepted only when no other compati
 remains undistinguished. **Production first** — prefer `direct` production queries over
 `interpreted` code reading at every step.
 
-#### Step 0. Fix the symptom
+#### Step 0. Document the symptom
 
-Create `./investigations/<slug>/` (kebab-case from symptom) with four files:
-1. `investigation-report.md` — final report (start with `## Symptom`)
-2. `evidence-log.md` — append-only evidence log (PW1)
-3. `hypothesis-log.md` — append-only hypothesis log (PW3)
-4. `model-change-log.md` — append-only model change log (PW2)
+Create `./investigations/<slug>/` (kebab-case from symptom) with this layout:
+1. `investigation-report-<N>_<timestamp>.md` — versioned narrative snapshots (PW1).
+   Multiple files: `investigation-report-1_<ts>.md` at Step 0 (symptom only),
+   `investigation-report-2_<ts>.md` after Step 0b, additional versions as the
+   investigation progresses, and a final version at termination.
+2. `evidence/` — one file per evidence entry E<N> (PW1)
+3. `hypothesis/` — one file per hypothesis event H<id>-<N> (PW3)
+4. `model-changes/` — one file per model change M<N> (PW2)
 
-Formal model files (`.dfy`, `.als`) also go here. Append entries as events happen, not after.
+Formal model files (`.dfy`, `.als`) go at the investigation root.
+
+**Report versioning.** Reports are immutable once written; new information produces a new
+versioned file rather than an edit in place. Each report from version 2 onward carries a
+`PrevReportHash:` field = `sha256(previous-report-file-bytes)`, forming a report chain
+parallel to the hypothesis and model chains. The first report (`investigation-report-1_*`)
+has no `PrevReportHash:`; it is the genesis anchor for all three chains — hypothesis, model,
+and report.
+
+Each record is its OWN file — no monolithic append logs. Filename format:
+`E1_2026-04-25T10-30-45-123Z.md`, `H1-2_2026-04-25T10-31-00-456Z.md`,
+`M1_2026-04-25T10-40-00-789Z.md`. The suffix is an ISO 8601 timestamp with millisecond
+precision, using `-` in place of `:` and `.` (filesystem-safe, sortable, greppable). Each
+record also carries a `Timestamp:` field with the full ISO 8601 value (with colons and
+decimal ms) INSIDE the file, e.g., `Timestamp: 2026-04-25T10:30:45.123Z`.
+
+**Chain structure — three relationships, not one flat chain.**
+
+1. **Hypothesis events chain to each other** — the causal-reasoning trail. Each hypothesis
+   record (H<id>-<N>) carries `PrevHypHash:` = `sha256(previous-hypothesis-event-file)`,
+   where "previous" is the H event with the next-lower `Timestamp:`. The first H event's
+   `PrevHypHash:` anchors to `sha256(investigation-report-1_*.md)` — the first (genesis) report.
+2. **Evidence attaches to a hypothesis event** — evidence exists to serve a specific check
+   or state transition. Each E record carries `ParentHypEvent: H<id>-<N>` identifying the
+   hypothesis event it was collected for, and `ParentHypHash: sha256(parent-file)` snapshotting
+   that parent at collection time. Evidence does NOT chain to other evidence.
+3. **Model-changes both chain and attach** — each M record carries `PrevModelHash:`
+   (sha256 of previous M, anchored on `sha256(investigation-report-1_*.md)` for the first)
+   AND `ParentHypEvent:` / `ParentHypHash:` identifying which hypothesis context triggered
+   the model iteration.
+4. **Reports chain to each other** — each `investigation-report-<N>_*.md` with N≥2 carries
+   `PrevReportHash:` = `sha256(investigation-report-<N-1>_*.md)`. The first report has no
+   `PrevReportHash:`; it is the genesis for all three parallel chains.
+
+**State-change events freeze their evidence.** When a hypothesis record is a `status-changed`
+event (to `compatible`, `weakened`, `rejected`, `undistinguished`, `accepted`), it carries
+`Evidence: [E<N>, E<M>, ...]` listing the specific evidence it rests on, plus `EvidenceHash:`
+= `sha256(sorted-concat-of-evidence-file-sha256s)`. Any later edit to any referenced
+evidence record invalidates the state-change's `EvidenceHash` — evidence becomes immutable
+once cited in a state transition.
+
+**Symptom-verification anchor.** At Step 0b, before collecting E1, write `H0-1: symptom-claimed`
+as the root anchor event. Its `PrevHypHash:` = `sha256(investigation-report-1_*.md)`. E1
+then links to H0-1 as its `ParentHypEvent:`. This keeps the "evidence must attach to a
+hypothesis event" rule consistent from the very first evidence.
+
+**Precondition.** Before writing any record, its parent (or chain predecessor) must exist
+on disk with ALL required fields. You cannot write H1-2 without H1-1 being complete; you
+cannot write E3 without its parent H event being complete; you cannot write a `status-changed`
+event without its cited evidence being complete. This makes construction sequential by
+necessity and makes the dependency graph explicit.
+
+Why this works instead of forcing sleeps: batch-flushing the whole structure at session end
+requires either (a) honest `Timestamp:` values matching wall-clock during the flush — caught
+by filesystem-provenance — or (b) backdated timestamps — also caught by filesystem-provenance.
+Meanwhile, the chain and reference hashes prevent any retroactive insert, reorder, or edit
+of a record that has already been cited or chained from.
+
+**Blocking precondition (PW0-init).** Before proceeding to Step 0a, Codex MUST create
+`investigation-report-1_<timestamp>.md` (the first report, with just the symptom sketch)
+plus the three subdirectories (`evidence/`, `hypothesis/`, `model-changes/`) on disk.
+Codex MUST NOT collect evidence, read code, or run queries before these exist on disk.
+Verify with a directory listing and show it to the user. Retroactive stub creation does
+not satisfy this rule.
 
 Pin down the symptom — ask and record: **What** (exact wrong behavior), **Where** (service,
 endpoint), **When** (always? intermittent?), **For whom** (all users? specific?), **What is NOT
@@ -44,13 +110,26 @@ repo, CI/CD. Write `## Tooling` noting `direct` vs `inferred` per tool.
 
 **S0-V — symptom verification required.** Confirm the symptom with at least one `direct` fact
 (production DB query, log, or live API observation) before Step 1. `interpreted` sources (reports,
-specs, prior investigations) must be re-verified against production. Append E1 to `evidence-log.md`.
-Update `## Symptom` with `**Verified by:**` citing E1.
+specs, prior investigations) must be re-verified against production.
+
+First write `hypothesis/H0-1_<timestamp>.md` with `Event: symptom-claimed` and
+`PrevHypHash: sha256(investigation-report-1_*.md)` — this anchors the hypothesis chain. Then
+write `evidence/E1_<timestamp>.md` with `ParentHypEvent: H0-1` and `ParentHypHash:` set to
+the sha256 of H0-1's file bytes. Then write `investigation-report-2_<timestamp>.md` (the
+updated narrative now including `**Verified by:** E1`) with `PrevReportHash:` = sha256 of
+`investigation-report-1_*.md`. Do NOT edit the first report — write a new version.
+
+**S0-V.1 — Symptom proximity check.** If the symptom is transport-shaped (DNS failure,
+`gaierror`, connection refused, socket timeout, 5xx, health-check fail, "host not found"),
+the first hypothesis MUST include "target process never started or crashed during startup."
+Before investigating the transport layer, gather `direct` evidence of upstream liveness:
+startup logs, container state, readiness probe, process list. If that evidence is
+unavailable, Step 1 is observability (expose startup output), not topology.
 
 #### Step 1. Build the minimal model
 
 Requires `formal-modeling` skill. Check production logs/traces for the actual execution path
-before writing model code. Append findings to `evidence-log.md`.
+before writing model code. Record any findings as `E<N>` files under `evidence/`.
 
 **Locating modeling tooling.** The `formal-modeling` skill ships the Alloy/Dafny runners
 (`alloy_run.sh`, `dafny_run.sh`, `verify.sh`) and reference `.als`/`.dfy` examples. When
@@ -58,12 +137,41 @@ installed as a plugin, look under `~/.codex/plugins/marketplaces/*/skills/formal
 (`scripts/` for runners, `references/` for example models). If not found there, check
 `~/.codex/skills/formal-modeling/` or ask the user for the install path before proceeding.
 
-**Default: create a formal model file** (`.dfy` for fast iteration, `.als` for counterexamples).
-The verifier catches edge cases that narrative reasoning misses. Run it, don't just write it.
+**Default: create a formal model file AND run the solver in the same step.** Use `.dfy` for
+fast iteration, `.als` for counterexamples. Building the model and running the solver are
+one atomic step — a `.dfy`/`.als` file without a `Solver result:` field in an `M<N>` record
+does NOT satisfy TC28. "Model exists but solver deferred pending evidence" is NOT an allowed
+state.
 
-**Model skip (user-acknowledged).** Codex may propose to skip if reasoning is clear, but the
-user must acknowledge. Explain what the model would verify and what edge cases are missed.
-Log as `M1: Skipped (user-acknowledged)` with reason. TC28 is satisfied by the skip entry.
+Consequences:
+- If constraints are too sparse to run usefully (e.g., waiting for S0-V.1 liveness evidence),
+  do one of: (a) defer MODEL CREATION until Step 4 evidence arrives, (b) run the solver
+  anyway on the sparse model — unsat or a minimal counterexample is still signal that narrows
+  the hypothesis space, or (c) propose a skip per the protocol below.
+- A solver run that times out counts as a run; record the timeout and which assertions were
+  tried. Partial results still satisfy TC28 when accompanied by a documented next step.
+- The M<N> entry MUST include the `Solver result:` field per the hypothesis-entry format.
+  An M1 entry without a solver result is a protocol violation caught by the termination gate.
+
+**Model skip — requires explicit user acknowledgement before writing the skip entry.**
+
+Protocol (MUST follow in order):
+1. Codex asks the user a single direct question: "Do you acknowledge skipping the formal
+   model? Here is what it would verify: `<X>`. Here are the edge cases narrative reasoning
+   misses: `<Y>`."
+2. Codex WAITS for a user message. Silence, "ok", "continue", or any non-response is NOT
+   acknowledgement. The reply must be an explicit affirmative ("yes, skip", "ack", "go ahead
+   without the model", etc.).
+3. ONLY after (2), Codex writes `M1: Skipped (user-acknowledged)` as an `M1` record under
+   `model-changes/`.
+   The entry MUST quote the user's verbatim acknowledgement string under an
+   `Acknowledgement:` field.
+4. If the user's reply is ambiguous, Codex re-asks. Codex does NOT infer acknowledgement
+   from context, priors, or prior sessions.
+
+Forbidden pattern: writing `M1: Skipped (user-acknowledged)` in the same turn that proposes
+the skip. The skip entry and the proposal MUST be in different turns separated by a user
+reply.
 
 Model only the **nearest causal layer**. Build four layers:
 1. **Normative** — business rule invariants, forbidden states, pre/postconditions
@@ -71,14 +179,14 @@ Model only the **nearest causal layer**. Build four layers:
 3. **Causal** — execution path to symptom, async/transaction boundaries, branch points
 4. **Observability** — expected traces per hypothesis, source reliability
 
-Append M1 to `model-change-log.md` with trigger, what was created, solver results.
+Write an `M1` record under `model-changes/` with trigger, what was created, and solver results.
 
 #### Step 2. Generate hypotheses
 
 Extract hypotheses from the model. Each **must** follow H1:
 `[condition] -> [mechanism] -> [state change] -> [symptom]`.
-For each, state the counterfactual (FZ1). Append `created`, `mechanism-stated`,
-`counterfactual-stated` entries to `hypothesis-log.md`.
+For each, state the counterfactual (FZ1). Write `created`, `mechanism-stated`, and
+`counterfactual-stated` records under `hypothesis/`.
 
 #### Step 3. Design distinguishing checks
 
@@ -113,12 +221,20 @@ Each fact gets a **reliability tag**:
 **F7** — Wrong values: trace WRITE paths, not read. Record `Analysis type: write-path`.
 **F8** — Numeric discrepancy: compute exact locally before estimating. Record `Computation method`.
 **F9** — Snapshot fields: check temporality before trusting. Record `Field temporality`.
+**F10** — Baseline comparability: differential vs "last known good" requires same repo, trigger,
+and config. Record `Baseline: <id> | repo=X trigger=Y config-diff=Z`. Mismatched baseline = `interpreted`.
+**F11** — Workspace contamination: local/CI investigations must check for untracked/gitignored
+files that mask CI failure. Run `<skill-dir>/scripts/check_workspace_clean.sh [paths]` (which
+wraps `git ls-files --others --exclude-standard` + gitignored enumeration). Use `--source-only`
+to filter common source extensions when noise is high. Record `Workspace clean: yes/no` on
+evidence derived from local state.
 
-Append E<N> entries to `evidence-log.md` immediately as facts are gathered.
+Write `E<N>` records under `evidence/` immediately as facts are gathered.
 
 #### Step 5. Update model with facts
 
-Add confirmed facts as model constraints. Re-run solver. Append M<N> to `model-change-log.md`.
+Add confirmed facts as model constraints. Re-run solver. Write an `M<N>` record under
+`model-changes/`.
 
 **Valid status transitions:**
 
@@ -131,19 +247,20 @@ Add confirmed facts as model constraints. Re-run solver. Append M<N> to `model-c
 | `rejected` | terminal — no transitions |
 | `accepted` | terminal — no transitions |
 
-Append `status-changed` entries to `hypothesis-log.md` with evidence reference.
+Write `status-changed` records under `hypothesis/` with evidence references.
 
 #### Step 6. Check diagnostic equivalence
 
 If hypotheses explain the same facts and predict the same for all checks — do NOT accept any,
-do NOT pick by "likelihood." Proceed to Step 7. Append `equivalence-checked` and
-`observability-assessed` (FZ2) entries to `hypothesis-log.md`.
+do NOT pick by "likelihood." Proceed to Step 7. Write `equivalence-checked` and
+`observability-assessed` (FZ2) records under `hypothesis/`.
 
 #### Step 7. Deepen the model
 
 Expand only where undistinguished hypotheses live. Directions: depth (code), depth (data),
 depth (type contracts — check types at call boundary when function returns default value),
-breadth (observability), breadth (concurrency). Append M<N>. Go back to Step 2.
+breadth (observability), breadth (concurrency). Write an `M<N>` record under
+`model-changes/`. Go back to Step 2.
 
 #### Step 8. Terminate or iterate
 
@@ -159,7 +276,7 @@ breadth (observability), breadth (concurrency). Append M<N>. Go back to Step 2.
 8. All cause classes reviewed — Model Coverage filled (M1)
 9. `direct` evidence supports conclusion (PV1)
 10. No stale `direct` evidence (F5)
-11. Evidence log has ≥1 `direct` entry (PW1)
+11. `evidence/` has ≥1 `direct` record (PW1)
 12. Model re-run after last fact integration if built (PW2)
 13. `mechanism-stated` logged (PW3/H1)
 14. `counterfactual-stated` logged (PW3/H2)
@@ -176,21 +293,81 @@ breadth (observability), breadth (concurrency). Append M<N>. Go back to Step 2.
 25. Wrong values: write path identified, not just read path (F7)
 26. Numeric: exact computation if replicable; residual >5% blocks termination (F8)
 27. Snapshot fields: confirmed live for current-state use (F9)
-28. Formal model exists with solver results, OR `M1: Skipped (user-acknowledged)` (PV2)
+28. Formal model exists with solver results, OR `M1: Skipped (user-acknowledged)` with an `Acknowledgement:` field quoting the user's verbatim affirmative reply from a turn AFTER the skip was proposed (PV2)
+29. Investigation layout was created at Step 0 before any Step 0b/1/4 activity (PW0-init). `investigation-report-1_<timestamp>.md` + three subdirectories (`evidence/`, `hypothesis/`, `model-changes/`) exist on disk. Filesystem ctime of each subdirectory precedes the earliest `Timestamp:` field value of any record inside it. Retroactive rebuild fails this check.
+30. Valid structured hash integrity and filesystem provenance (PW0-live). (a) Every record file has a `Timestamp:` field in ISO 8601 UTC with millisecond precision; (b) `investigation-report-<N>_*.md` files chain via `PrevReportHash:` (first report has none); (c) hypothesis records form a valid SHA-256 chain via `PrevHypHash:` anchored on `sha256(investigation-report-1_*.md)`; (d) evidence records have a valid `ParentHypEvent:` + `ParentHypHash:` pointing to an existing hypothesis event; (e) model-change records chain via `PrevModelHash:` and have valid `ParentHypEvent:` + `ParentHypHash:`; (f) every `status-changed`/`accepted` hypothesis record has a matching `EvidenceHash:` over the cited `Evidence:` list; (g) each record's in-field `Timestamp:` matches filesystem ctime within 60 seconds.
+31. Transport-shaped symptom: upstream process liveness proven via `direct` evidence before transport investigation (S0-V.1)
+32. Differential evidence: baseline repo/trigger/config match the failing run (F10)
+33. Local/CI investigations: workspace contamination checked via `git status --ignored` (F11)
+34. No system change preceded `direct` evidence of the changed state (OB1)
+35. Every `rejected` hypothesis has a valid `Reason:` (evidence-based with `Evidence: E<N>`, or preference-based with an allowed `Priority:` + `Rationale:`) in its `status-changed` log entry (U2-doc)
 
-If any fails, iterate. Before acceptance, append `alternative-considered` + `status-changed`
-to `hypothesis-log.md`. Assemble report: Symptom, Conclusion, Hypothesis History, Evidence Log,
-Hypothesis Log, Model Change Log, Model Coverage, Remaining Uncertainties, Next Steps.
+If any fails, iterate. Before acceptance, write an `alternative-considered` and a
+`status-changed` event file under `hypothesis/`. Assemble report: Symptom, Conclusion,
+Hypothesis History, Evidence Log, Hypothesis Log, Model Change Log, Model Coverage,
+Remaining Uncertainties, Next Steps. The report may reference the individual record files
+by name (e.g., "E1, E4, and H2-3 together rule out ...").
 
 ---
 
-## Proof of work logs
+## Proof of work records
 
-Three append-only logs, written as events happen. PW1: evidence log needs ≥1 `direct` entry.
-PW2: model log needs ≥1 entry if model built, re-run after fact integration. PW3: hypothesis
-log needs TC13-18 events.
+Three per-record subdirectories, one file per event. PW1: `evidence/` needs ≥1 `direct`
+entry. PW2: `model-changes/` needs ≥1 file if a model is built, re-run after fact
+integration. PW3: `hypothesis/` needs TC13-18 events across the hypothesis lifecycle.
 
-**Evidence entry format:** `E<N>: [description]` with Step, Collected at, Source, Reliability,
+**PW0-init — stub layout is a blocking precondition.** `investigation-report-1_<timestamp>.md` plus the
+three subdirectories (`evidence/`, `hypothesis/`, `model-changes/`) MUST exist on disk
+before Step 0a begins. No evidence collection, code reading, or queries may precede their
+creation. Verify via directory listing shown to the user.
+
+**PW0-live — per-record files with structured hash integrity.** Each E, H, M event is its
+OWN file with a timestamp suffix in the filename, a `Timestamp:` field inside, and
+reference-hash fields tying it to its dependencies. Enforcement (TC30) is four-part:
+
+1. **No missing Timestamp:** every record file must have a `Timestamp:` field in ISO 8601
+   UTC form with millisecond precision (e.g., `Timestamp: 2026-04-25T10:30:45.123Z`).
+2. **Hypothesis chain valid:** hypothesis records sorted by `Timestamp:` form a valid
+   SHA-256 chain. Each H record's `PrevHypHash:` equals `sha256(previous-H-file-bytes)`.
+   First H record's `PrevHypHash:` equals `sha256(investigation-report-1_*.md)`.
+3. **Evidence parent link valid:** every E record has `ParentHypEvent: H<id>-<N>` pointing
+   to an existing H event, and `ParentHypHash:` equals `sha256(parent-H-file-bytes)`.
+   Evidence is not cross-chained. Model-change records have `ParentHypEvent:` +
+   `ParentHypHash:` the same way, and additionally chain via `PrevModelHash:` to the
+   previous M (or `sha256(investigation-report-1_*.md)` for the first M).
+   Reports with N≥2 chain via `PrevReportHash:` = `sha256(investigation-report-<N-1>_*.md)`.
+4. **State-change EvidenceHash valid:** hypothesis records with `Event: status-changed`
+   (or `accepted`) include `Evidence: [E<N>, ...]` and `EvidenceHash:` = SHA-256 over
+   the sorted concatenation of the cited evidence files' own SHA-256 hashes. Any later
+   edit to any cited evidence invalidates this hash. Evidence records become immutable
+   once cited in a state transition.
+5. **Filesystem provenance:** the in-field `Timestamp:` must match the file's creation
+   time within 60 seconds. Large disagreement = backdated record.
+
+These checks together make the following attacks detectable:
+- Retroactive insert/reorder/edit of a hypothesis event → hypothesis chain mismatch
+- Fake evidence attached to a closed state-change → EvidenceHash mismatch
+- Evidence tampered with after being cited → EvidenceHash mismatch
+- Orphan evidence without a parent → missing `ParentHypEvent:` or mismatched `ParentHypHash:`
+- Batch-flush at session end → filesystem-provenance mismatch (if timestamps backdated)
+  or matched wall-clock mismatch (if timestamps honest but clustered)
+
+Records can be written at whatever pace the investigation runs — the structure enforces
+sequential dependencies without requiring artificial sleeps.
+
+Before acceptance, run `<skill-dir>/scripts/check_pw0_live.py <investigation-dir>` — exit 0
+is required.
+
+**Report record format:** A file at `investigation-report-<N>_<timestamp-suffix>.md` where
+`<N>` starts at 1 and increments with each new version. Required fields in the body:
+`Timestamp:` (ISO 8601 UTC ms), and `PrevReportHash:` (sha256 of the previous report file)
+for N≥2. The first report has no `PrevReportHash:`. Narrative content (Symptom, Severity,
+Tooling, and later Conclusion / Hypothesis History / etc.) follows.
+
+**Evidence record format:** A file at `evidence/E<N>_<timestamp-suffix>.md` with first line
+`E<N>: [description]`, followed by required fields: `Timestamp:` (ISO 8601 UTC ms),
+`ParentHypEvent:` (the H record it serves, e.g., `H1-2` or `H0-1` for symptom verification),
+`ParentHypHash:` (sha256 of the parent H file at collection time), Step, Source, Reliability,
 Raw observation, Interpretation, Integrated?, Hypotheses affected, Verification query.
 **F6-F9 optional fields:** `Absence sources: N/M` + verdict (F6), `Analysis type: write-path` +
 `Producer identified` (F7), `Computation method` + `Residual` (F8), `Field temporality` +
@@ -199,15 +376,31 @@ Raw observation, Interpretation, Integrated?, Hypotheses affected, Verification 
 **F5 staleness:** `direct` evidence goes stale after deploy/migration. Re-verify before acceptance.
 If investigation spans sessions, re-verify all prior `direct` evidence.
 
-**Model entry format:** `M<N>: [description]` with Step, Trigger, What changed, Solver result.
+**Model record format:** A file at `model-changes/M<N>_<timestamp-suffix>.md` with first
+line `M<N>: [description]`, followed by required fields: `Timestamp:` (ISO 8601 UTC ms),
+`PrevModelHash:` (sha256 of previous M, or sha256 of `investigation-report-1_*.md` for the first),
+`ParentHypEvent:` (triggering H event), `ParentHypHash:` (sha256 of that parent H at the
+time of this model change), Step, Trigger, What changed, Solver result.
 
-**Hypothesis entry format:** `H<id>-<N>: [event]` with Step, Hypothesis, Event (created |
+**Hypothesis record format:** A file at `hypothesis/H<id>-<N>_<timestamp-suffix>.md` with
+first line `H<id>-<N>: [event]`, followed by required fields: `Timestamp:` (ISO 8601 UTC ms),
+`PrevHypHash:` (sha256 of previous H record — or sha256 of `investigation-report-1_*.md` for the
+first H, which is H0-1 at Step 0b), Step, Hypothesis, Event (symptom-claimed | created |
 mechanism-stated | counterfactual-stated | observability-assessed | alternative-considered |
-status-changed | equivalence-checked), Detail, Linked evidence.
+status-changed | equivalence-checked), Detail.
 
-**Pre-acceptance log checklist** (mirrors TC1-28):
-1. Evidence log has `direct` entry (PW1)
-2. Model log has entry if built; re-run after facts (PW2)
+For `Event: status-changed` (any target status) or `Event: accepted`, additionally include:
+`Evidence: [E<N>, E<M>, ...]` listing the specific evidence that justifies this transition,
+and `EvidenceHash:` = SHA-256 over the sorted concatenation of the cited evidence files'
+own SHA-256 hashes. For `status-changed` to `rejected`, also add `Reason:` — either
+`evidence` + `Evidence: E<N>` (the evidence list also populates the EvidenceHash) OR
+`preference` + `Priority:` (from the allowed set) + `Rationale:` (non-empty text; a
+preference-based rejection still needs `Evidence: []` + `EvidenceHash:` = sha256 of empty
+concatenation).
+
+**Pre-acceptance log checklist** (mirrors TC1-35):
+1. `evidence/` has a `direct` record (PW1)
+2. `model-changes/` has an entry if a model was built, and it was re-run after facts (PW2)
 3. `mechanism-stated` logged (H1)
 4. `counterfactual-stated` logged (H2)
 5. `observability-assessed` = observable (FZ2)
@@ -227,6 +420,13 @@ status-changed | equivalence-checked), Detail, Linked evidence.
 19. Numeric: `exact-local` + `Residual ≤5%` (F8)
 20. Snapshot: `Field temporality: live` for current-state (F9)
 21. Model skip: `M1: Skipped (user-acknowledged)` with rationale (TC28/PV2)
+22. Stub files created at Step 0 before any evidence collection (TC29/PW0-init)
+23. No burst writes on the termination turn (TC30/PW0-live)
+24. Transport-shaped symptom: liveness proven before transport investigation (TC31/S0-V.1)
+25. Differential baseline matches on repo/trigger/config (TC32/F10)
+26. Workspace contamination checked when local/CI is involved (TC33/F11)
+27. No intervention before direct evidence of the state changed (TC34/OB1)
+28. Every `rejected` hypothesis has a documented `Reason:` + backing field (TC35/U2-doc)
 
 If any fails, iterate.
 
@@ -239,6 +439,11 @@ If any fails, iterate.
 **T1** — Every check: which hypotheses does it distinguish? Compatible with all = zero value.
 **U1** — Accept only if no other hypothesis is compatible. If undistinguished → deepen, don't pick.
 **U2** — Multiple compatible hypotheses: keep all active, do not collapse.
+**U2-doc** — Every `status-changed` entry to `rejected` MUST carry a `Reason:` field:
+`Reason: evidence` + `Evidence: E<N>` (cite the specific entry) OR
+`Reason: preference` + `Priority: <name>` + `Rationale: <text>`.
+Allowed `Priority:` values: `Occam`, `BlastRadius`, `Severity`, `RecencyOfDeploy`,
+`Reproducibility`, `FixCost`. Any other priority must be raised to the user first.
 **M2** — Before accepting, name ≥1 alternative mechanism.
 
 **M1 — blind spot checklist** (all must be reviewed before acceptance):
@@ -253,8 +458,12 @@ Tenant isolation, Auth state, Deployment drift, Multi-artifact versions, Build p
 **F7** — Wrong value: trace WRITE paths (INSERT/UPDATE), not read paths. Match value to producer.
 **F8** — Numeric discrepancy: compute exact locally before estimating. Residual >5% = compute instead.
 **F9** — DB field as current state: check temporality (live/snapshot/scheduled). Snapshot = `inferred`.
+**F10** — Baseline comparability: differential requires matching repo/trigger/config. Record the diff.
+**F11** — Workspace contamination: check `git status --ignored` + `git ls-files --others` on local/CI mixes.
+**OB1** — Observability before intervention. Don't change topology/config/code under investigation
+until you have `direct` evidence of the state being changed. Blind intervention moves the target.
 **PV1** — ≥1 `direct` fact must support acceptance. Code reading alone is insufficient.
-**PV2** — Formal model required. Skip only with user acknowledgement + documented tradeoff.
+**PV2** — Formal model required. Skip requires: (a) Codex asked, (b) user replied affirmatively in a later turn, (c) the user's verbatim reply is quoted in the skip entry. Inferring acknowledgement from silence, prior preferences, or memory is forbidden.
 **FZ1** — State counterfactual for each hypothesis.
 **FZ2** — Unobservable counterfactual blocks acceptance. Deepen observability, don't assume true.
 **FM1** — ≥1 `direct` fact before building model. Sequence: verify → code → hypothesize → model → verify fix.
@@ -277,3 +486,30 @@ Tenant isolation, Auth state, Deployment drift, Multi-artifact versions, Build p
 - `templates/tooling-inventory.md` — Template for tooling inventory. Copy into the project's
   `investigations/` directory and fill in. The skill reads it at Step 0a to avoid
   re-enumerating tools each investigation.
+- `scripts/check_pw0_live.py` — TC30/PW0-live enforcement. Run against an investigation
+  directory before acceptance: `python3 scripts/check_pw0_live.py investigations/<slug>`.
+  Validates report/hypothesis/model hash chains, evidence parent links, state-change
+  `EvidenceHash:` values, and filesystem timestamp provenance.
+- `scripts/check_workspace_clean.sh` — TC33/F11 enforcement. Run against the paths
+  relevant to the investigation: `scripts/check_workspace_clean.sh src/ bot/`. Fails
+  if any untracked or gitignored files exist under those paths. `--source-only` filters
+  to common source extensions when the noise floor is high (e.g., `.DS_Store`, build
+  artifacts). Exit 0 = clean, 1 = contamination.
+- `scripts/check_rejection_reasons.py` — TC35/U2-doc enforcement. Run against an
+  investigation directory: `python3 scripts/check_rejection_reasons.py investigations/<slug>`.
+  Flags `status-changed`-to-`rejected` entries missing `Reason:`, using `preference`
+  without an allowed `Priority:`, or missing `Evidence:`/`Rationale:` backing fields.
+- `scripts/sha256_file.py <path>` — print SHA-256 hex of one file. Use for computing
+  `PrevHypHash:`, `PrevModelHash:`, `PrevReportHash:`, and `ParentHypHash:` values.
+- `scripts/evidence_hash.py <file> [<file> ...]` — compute `EvidenceHash:` for a
+  state-change record. Hashes each input individually, sorts the hex digests, concatenates,
+  then takes sha256 of the result. Order-independent (same inputs → same hash regardless
+  of argument order).
+- `scripts/now_iso.py [--filename]` — current UTC timestamp with millisecond precision.
+  Default form is the in-field `Timestamp:` value (`2026-04-25T10:30:45.123Z`); `--filename`
+  gives the filename-safe form (`2026-04-25T10-30-45-123Z`) with `:` and `.` replaced by `-`.
+- `scripts/iso_to_filename.py <iso>` / `--reverse <filename>` — convert between the two
+  timestamp forms.
+- `scripts/time_delta.py <earlier> <later>` — signed time delta in seconds with ms
+  precision. Accepts either canonical or filename-safe ISO form. Useful for verifying
+  the 60s filesystem-vs-field tolerance and for computing investigation span.
