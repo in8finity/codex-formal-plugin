@@ -301,6 +301,7 @@ breadth (observability), breadth (concurrency). Write an `M<N>` record under
 33. Local/CI investigations: workspace contamination checked via `git status --ignored` (F11)
 34. No system change preceded `direct` evidence of the changed state (OB1)
 35. Every `rejected` hypothesis has a valid `Reason:` (evidence-based with `Evidence: E<N>`, or preference-based with an allowed `Priority:` + `Rationale:`) in its `status-changed` log entry (U2-doc)
+36. Single-record write discipline observed throughout the investigation (PW0-strict): each E/H/M record was written by exactly one `Write` call, preceded by `Bash` calls to `now_iso.py` and `sha256_file.py` for fresh values; no multi-file write/repair helper was used; pre-write narration was present for each chain record
 
 If any fails, iterate. Before acceptance, write an `alternative-considered` and a
 `status-changed` event file under `hypothesis/`. Assemble report: Symptom, Conclusion,
@@ -340,9 +341,15 @@ reference-hash fields tying it to its dependencies. Enforcement (TC30) is four-p
    (or `accepted`) include `Evidence: [E<N>, ...]` and `EvidenceHash:` = SHA-256 over
    the sorted concatenation of the cited evidence files' own SHA-256 hashes. Any later
    edit to any cited evidence invalidates this hash. Evidence records become immutable
-   once cited in a state transition.
+   once cited in a state transition. If a state-change record has been superseded by a
+   later hypothesis record carrying `Supersedes: H<id>-<N>`, this per-record EvidenceHash
+   check is excused for the superseded record; its broken state is preserved as audit
+   trail while the superseding record carries the fresh valid hash.
 5. **Filesystem provenance:** the in-field `Timestamp:` must match the file's creation
-   time within 60 seconds. Large disagreement = backdated record.
+   time within 60 seconds. Large disagreement = backdated record. Superseded records are
+   excused from this per-record check for the same reason as Check 4: the historical
+   mismatch remains visible on disk, but no longer blocks acceptance once a superseding
+   record exists.
 
 These checks together make the following attacks detectable:
 - Retroactive insert/reorder/edit of a hypothesis event → hypothesis chain mismatch
@@ -357,6 +364,65 @@ sequential dependencies without requiring artificial sleeps.
 
 Before acceptance, run `<skill-dir>/scripts/check_pw0_live.py <investigation-dir>` — exit 0
 is required.
+
+**PW0-strict — single-record write discipline.** This is the binding rule that prevents
+batch-fix shortcuts. The structural integrity of the chain only holds if each record was
+actually constructed sequentially against the live state of its predecessor.
+
+1. **One Write per record.** Each E/H/M record is written by exactly one `Write` tool call,
+   immediately preceded by `Bash` calls that read the current wall-clock time and the
+   predecessor's SHA-256. Use `scripts/now_iso.py` and `scripts/sha256_file.py`. The
+   `Timestamp:` and `PrevHypHash:` / `ParentHypHash:` / `PrevModelHash:` /
+   `PrevReportHash:` / `EvidenceHash:` values MUST be the values returned by those calls.
+   Never synthesize them, and never derive them from a multi-file write helper.
+
+2. **No multi-file write helpers.** Read-only helpers that compute hashes or timestamps
+   for a single record (`sha256_file.py`, `evidence_hash.py`, `now_iso.py`) are allowed
+   and encouraged. Any Bash/Python invocation that writes, edits, or rechains two or more
+   record files in a single pass is forbidden, including for setup, convenience, or fixups
+   after a checker fails.
+
+3. **Append-only forever. Never delete or rewrite a record.** Once an E/H/M/report file
+   is written, its bytes are immutable and its existence on disk is permanent. Deletion,
+   in-place rewriting, renaming, or moving as a repair is forbidden. If a record is wrong,
+   the only remedy is to write a new record that supersedes it. The broken record stays on
+   disk as visible audit trail.
+
+4. **If a checker fails, repair file-by-file.** When `check_pw0_live.py` or
+   `check_rejection_reasons.py` reports violations across multiple files, repair each
+   affected record individually with a fresh `Bash` call to `now_iso.py` and a fresh
+   `Write`. Do not write a script to fix multiple files at once, and do not propose one.
+
+5. **Cost is not a justification.** Permission prompts, tool round-trips, and context
+   size are costs accepted in exchange for the protocol's integrity. "Batching saves
+   prompts/tokens/time" is not a valid reason to violate the rules above.
+
+6. **Supersedes mechanism for repairing broken records.** When a record needs correction
+   (for example, a state-change with stale `EvidenceHash:` after cited evidence changed),
+   write a new state-change record carrying `Supersedes: H<id>-<N>` naming the record it
+   replaces. The new record has its own fresh `Timestamp:`, `PrevHypHash:`, `Evidence:`,
+   and `EvidenceHash:` values. The original broken record stays on disk untouched.
+
+   `check_pw0_live.py` excuses a superseded record from the two per-record validity checks
+   where "the broken state IS the audit trail":
+   - Check 4 (`EvidenceHash:` validity)
+   - Check 5 (filesystem provenance: `Timestamp:` vs ctime within 60 seconds)
+
+   Chain and parent-link checks still apply transitively because they are about the
+   superseded record's relationships to other records, not its own repaired validity:
+   - Check 2 (`PrevHypHash:` chain)
+   - Check 3 (`ParentHypEvent:` / `ParentHypHash:` links)
+
+7. **Pre-Write narration.** Before each `Write` of a chain record, state in one sentence
+   the file being written, the `Timestamp:` value just read from `now_iso.py`, and the
+   PrevHash/ParentHash/EvidenceHash value just computed. Skipping this is itself a
+   PW0-strict violation.
+
+Forbidden patterns:
+- Drafting many records first, then writing them in rapid succession with timestamps
+  computed in a loop
+- Deleting a broken record to make a checker pass
+- Treating deletion as distinct from edit; both are forbidden mutations of disk state
 
 **Report record format:** A file at `investigation-report-<N>_<timestamp-suffix>.md` where
 `<N>` starts at 1 and increments with each new version. Required fields in the body:
@@ -398,7 +464,7 @@ own SHA-256 hashes. For `status-changed` to `rejected`, also add `Reason:` — e
 preference-based rejection still needs `Evidence: []` + `EvidenceHash:` = sha256 of empty
 concatenation).
 
-**Pre-acceptance log checklist** (mirrors TC1-35):
+**Pre-acceptance log checklist** (mirrors TC1-36):
 1. `evidence/` has a `direct` record (PW1)
 2. `model-changes/` has an entry if a model was built, and it was re-run after facts (PW2)
 3. `mechanism-stated` logged (H1)
@@ -427,6 +493,7 @@ concatenation).
 26. Workspace contamination checked when local/CI is involved (TC33/F11)
 27. No intervention before direct evidence of the state changed (TC34/OB1)
 28. Every `rejected` hypothesis has a documented `Reason:` + backing field (TC35/U2-doc)
+29. Single-record write discipline observed (TC36/PW0-strict): one `Write` per record, fresh `Bash` calls for time and predecessor hash, no multi-file write/repair helpers, pre-write narration present
 
 If any fails, iterate.
 
@@ -462,6 +529,10 @@ Tenant isolation, Auth state, Deployment drift, Multi-artifact versions, Build p
 **F11** — Workspace contamination: check `git status --ignored` + `git ls-files --others` on local/CI mixes.
 **OB1** — Observability before intervention. Don't change topology/config/code under investigation
 until you have `direct` evidence of the state being changed. Blind intervention moves the target.
+**PW0-strict** — One `Write` per record, with fresh `Bash` calls for time and predecessor hash.
+No multi-file write/repair helpers. If a checker fails, fix each affected file individually with
+a new `Bash` + `Write` per file. Cost (tokens, prompts, round-trips) is not a justification.
+Pre-write narration must state the file, `Timestamp:`, and predecessor hash before each `Write`.
 **PV1** — ≥1 `direct` fact must support acceptance. Code reading alone is insufficient.
 **PV2** — Formal model required. Skip requires: (a) Codex asked, (b) user replied affirmatively in a later turn, (c) the user's verbatim reply is quoted in the skip entry. Inferring acknowledgement from silence, prior preferences, or memory is forbidden.
 **FZ1** — State counterfactual for each hypothesis.
@@ -489,7 +560,8 @@ until you have `direct` evidence of the state being changed. Blind intervention 
 - `scripts/check_pw0_live.py` — TC30/PW0-live enforcement. Run against an investigation
   directory before acceptance: `python3 scripts/check_pw0_live.py investigations/<slug>`.
   Validates report/hypothesis/model hash chains, evidence parent links, state-change
-  `EvidenceHash:` values, and filesystem timestamp provenance.
+  `EvidenceHash:` values, and filesystem timestamp provenance, while excusing superseded
+  records from the per-record Check 4 and Check 5 validity rules.
 - `scripts/check_workspace_clean.sh` — TC33/F11 enforcement. Run against the paths
   relevant to the investigation: `scripts/check_workspace_clean.sh src/ bot/`. Fails
   if any untracked or gitignored files exist under those paths. `--source-only` filters
